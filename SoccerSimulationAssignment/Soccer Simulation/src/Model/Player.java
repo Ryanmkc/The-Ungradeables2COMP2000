@@ -96,31 +96,39 @@ public class Player implements Actor {
         return ActorShapeEnum.SQUARE;
     }
 
-    @Override
     public void moveUp(int distance) {
-        if (this.y - distance >= 0) {
-            this.y -= distance;
+        int newY = this.y - distance;
+        if (newY < 0) {
+            throw new InvalidPositionException(
+                "Player " + name + " cannot move up to y=" + newY + " — outside the pitch");
         }
+        this.y = newY;
     }
-
-    @Override
+    
     public void moveDown(int distance) {
-        if (this.y + distance <= Rendering.ScreenSize.height) {
-            this.y += distance;
+        int newY = this.y + distance;
+        if (newY > Rendering.ScreenSize.height) {
+            throw new InvalidPositionException(
+                "Player " + name + " cannot move down to y=" + newY + " — outside the pitch");
         }
+        this.y = newY;
     }
-
-    @Override
+    
     public void moveLeft(int distance) {
-        if (this.x - distance >= 0) {
-            this.x -= distance;
+        int newX = this.x - distance;
+        if (newX < 0) {
+            throw new InvalidPositionException(
+                "Player " + name + " cannot move left to x=" + newX + " — outside the pitch");
         }
+        this.x = newX;
     }
-
-    @Override
+    
     public void moveRight(int distance) {
-        if (this.x + distance <= Rendering.ScreenSize.width) {
-            this.x += distance;
+        int newX = this.x + distance;
+        if (newX > Rendering.ScreenSize.width) {
+            throw new InvalidPositionException(
+                "Player " + name + " cannot move right to x=" + newX + " — outside the pitch");
         }
+        this.x = newX;
     }
 }

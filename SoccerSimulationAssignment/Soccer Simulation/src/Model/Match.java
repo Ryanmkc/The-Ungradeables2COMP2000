@@ -1,3 +1,4 @@
+
 // WILLIAM + RYAN IS DOING THIS
 /*
  * use the display already made in the soccer pitch class,
@@ -15,6 +16,7 @@ import java.awt.*;
 import javax.swing.*;
 import Rendering.ScreenSize;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class Match {
     public SoccerPitch pitch;
@@ -23,20 +25,38 @@ public class Match {
     // Main Arrays
     private ArrayList<Actor> gameActors;
     private ArrayList<Player> players;
+    private final PlayerMovementStrategy chaseStrategy = new ChaseStrategy();
+    private final PlayerMovementStrategy formationStrategy = new FormationStrategy();
     private volatile boolean isRunning;
+    private volatile boolean isPaused;
     private Thread simulationThread;
 
     // Controls passing decisions and prevents a player immediately
     // collecting the ball again after making a pass
     private final Random random = new Random();
-    private int ticksUntilPass = 70;
+    private int ticksUntilPass = 50;
     private Player recentPasser;
     private int recentPasserCooldown;
     private int possessionTicks;
+    private Player trackedOwner;
+    private int trackedOwnerX;
+    private int trackedOwnerY;
+    private int trackedOwnerTicks;
+    private int trafficAnchorX;
+    private int trafficAnchorY;
+    private int trafficTicks;
+    private int contestedTicks;
+    private int clearanceCooldown;
 
     private static final int MIN_TICKS_BEFORE_RANDOM_KICK = 30;
-    private static final int MAX_POSSESSION_TICKS = 120;
-    private static final int RANDOM_KICK_CHANCE = 180;
+    private static final int MAX_POSSESSION_TICKS = 105;
+    private static final int RANDOM_KICK_CHANCE = 240;
+    private static final int STUCK_CHECK_TICKS = 45;
+    private static final int MIN_PROGRESS_DISTANCE = 12;
+    private static final int TRAFFIC_CHECK_TICKS = 22;
+    private static final int CONTESTED_CHECK_TICKS = 16;
+    private static final int CORNER_CHECK_TICKS = 16;
+    private static final int CLEARANCE_COOLDOWN = 45;
 
     // Players briefly pause after losing possession
     private final Map<Player, Integer> stunnedPlayers = new HashMap<>();
@@ -54,19 +74,26 @@ public class Match {
         this.gameActors = new ArrayList<>();
         this.players = new ArrayList<>();
         this.isRunning = false;
+        this.isPaused = false;
     }
 
     // spawn entities
     public void setupAndStartSimulation(String homeFormation, String awayFormation) {
         // Stop an old loop before starting a new match
         stopSimulation();
+        isPaused = false;
 
         gameActors.clear();
         players.clear();
         recentPasser = null;
         recentPasserCooldown = 0;
-        ticksUntilPass = 70;
+        ticksUntilPass = 50;
         possessionTicks = 0;
+        trackedOwner = null;
+        trackedOwnerTicks = 0;
+        trafficTicks = 0;
+        contestedTicks = 0;
+        clearanceCooldown = 0;
         stunnedPlayers.clear();
         homeScore = 0;
         awayScore = 0;
@@ -165,6 +192,10 @@ public class Match {
     // background engine checking frame
     private void runSimulationEngineLoop() {
         while (isRunning) {
+            if (isPaused) {
+                if (!pauseForNextFrame()) break;
+                continue;
+            }
             updateStunnedPlayers();
 
             // Briefly hold the reset formation after a goal before restarting
@@ -208,8 +239,9 @@ public class Match {
 
             if (owner == null) {
                 // Only the closest outfield player from each team chase loose ball
-                homeChaser = findClosestPlayer(true, ballX, ballY);
-                awayChaser = findClosestPlayer(false, ballX, ballY);
+                Map<Boolean, Optional<Player>> closestPlayers = findClosestPlayersByTeam(ballX, ballY);
+                homeChaser = closestPlayers.getOrDefault(true, Optional.empty()).orElse(null);
+                awayChaser = closestPlayers.getOrDefault(false, Optional.empty()).orElse(null);
             } else {
                 // When ball is owned, closest opponent presses
                 presser = findClosestOpponent(owner);
@@ -217,32 +249,53 @@ public class Match {
 
             // player ai
             for (Player p : players) {
-                if (isStunned(p)) {
-                    // A player who has just lost the ball cannot instantly steal it back
-                    continue;
-                } else if (p.isGoalkeeper()) {
-                    updateGoalkeeper(p, ballY);
-                } else if (owner == null) {
-                    if (p == homeChaser || p == awayChaser) {
-                        moveToward(p, ballX, ballY, 2);
+                try {
+                    if (isStunned(p)) {
+                        // A player who has just lost the ball cannot instantly steal it back
+                        continue;
+                    } else if (p.isGoalkeeper()) {
+                        updateGoalkeeper(p, ballY);
+                    } else if (owner == null) {
+                        if (p == homeChaser || p == awayChaser) {
+                            chaseStrategy.move(this, p, ballX, ballY);
+                        } else {
+                            // Everyone else shuffles with the play but keeps formation
+                            formationStrategy.move(this, p, ballX, ballY);
+                        }
+                    } else if (p == owner) {
+                        // The player in possession dribbles toward the opposing goal
+                        int direction = isHome(p) ? 1 : -1;
+                        moveToward(p, p.getX() + (direction * 25), p.getY(), 1);
+                    } else if (p == presser) {
+                        chaseStrategy.move(this, p, owner.getX(), owner.getY());
                     } else {
                         // Everyone else shuffles with the play but keeps formation
-                        moveIntoShape(p, ballX, ballY);
+                        formationStrategy.move(this, p, ballX, ballY);
                     }
-                } else if (p == owner) {
-                    // The player in possession dribbles toward the opposing goal
-                    int direction = isHome(p) ? 1 : -1;
-                    moveToward(p, p.getX() + (direction * 25), p.getY(), 1);
-                } else if (p == presser) {
-                    moveToward(p, owner.getX(), owner.getY(), 2);
-                } else {
-                    // Everyone else shuffles with the play but keeps formation
-                    moveIntoShape(p, ballX, ballY);
+                } catch (InvalidPositionException e) {
+                    // This player's move would have taken them off the pitch —
+                    // skip it for this tick and let them try again next tick
+                    System.out.println(e.getMessage());
                 }
             }
 
-            resolvePlayerCollisions();
-            attemptTackle();
+            try {
+                resolvePlayerCollisions();
+            } catch (InvalidPositionException e) {
+                System.out.println(e.getMessage());
+            }
+
+            try {
+                attemptTackle();
+            } catch (InvalidPositionException e) {
+                System.out.println(e.getMessage());
+            }
+
+            if (clearBallFromTraffic()) {
+                pitch.setActors(gameActors);
+                if (!pauseForNextFrame()) break;
+                continue;
+            }
 
             if (recentPasserCooldown > 0) {
                 recentPasserCooldown--;
@@ -253,36 +306,45 @@ public class Match {
 
             // collision: whichever eligible player is closest takes possession
             if (ball.getOwner() == null) {
+                trackedOwner = null;
+                trackedOwnerTicks = 0;
                 int pickupRadius = 18; // matches ~9px draw radius of circle, so they visually touch
                 Player collector = findPlayerTouchingBall(pickupRadius);
 
                 if (collector != null) {
                     ball.setOwner(collector);
                     possessionTicks = 0;
-                    // Hold ball for roughly 1-2 seconds before pass
-                    ticksUntilPass = 50 + random.nextInt(70);
+                    ticksUntilPass = 40 + random.nextInt(35);
                 }
             } else {
                 ticksUntilPass--;
                 possessionTicks++;
 
                 Player passer = ball.getOwner();
+                boolean stuck = isOwnerStuck(passer);
                 boolean randomKick = possessionTicks >= MIN_TICKS_BEFORE_RANDOM_KICK
                         && random.nextInt(RANDOM_KICK_CHANCE) == 0;
                 boolean heldTooLong = possessionTicks >= MAX_POSSESSION_TICKS;
 
-                if (randomKick || heldTooLong) {
-                    kickBallRandomly(passer);
+                if (shouldShoot(passer)) {
+                    shootBall(passer);
                     rememberKicker(passer);
-                    ticksUntilPass = 50 + random.nextInt(70);
+                    ticksUntilPass = 40 + random.nextInt(35);
+                } else if (stuck) {
+                    kickBallOutOfTraffic(passer);
+                    rememberKicker(passer);
+                    ticksUntilPass = 40 + random.nextInt(35);
+                } else if (randomKick || heldTooLong) {
+                    kickBallForward(passer);
+                    rememberKicker(passer);
+                    ticksUntilPass = 40 + random.nextInt(35);
                 } else if (ticksUntilPass <= 0) {
-                    // ormal pass first, if nobody is available kick
                     if (!passBall(passer)) {
-                        kickBallRandomly(passer);
+                        kickBallForward(passer);
                     }
 
                     rememberKicker(passer);
-                    ticksUntilPass = 50 + random.nextInt(70);
+                    ticksUntilPass = 40 + random.nextInt(35);
                 }
             }
 
@@ -366,8 +428,11 @@ public class Match {
 
         recentPasser = null;
         recentPasserCooldown = 0;
-        ticksUntilPass = 70;
+        ticksUntilPass = 50;
         possessionTicks = 0;
+        trafficTicks = 0;
+        contestedTicks = 0;
+        clearanceCooldown = 0;
         stunnedPlayers.clear();
     }
 
@@ -430,7 +495,7 @@ public class Match {
         stunnedPlayers.put(playerWhoLostBall, STUN_TICKS);
 
         possessionTicks = 0;
-        ticksUntilPass = 50 + random.nextInt(70);
+        ticksUntilPass = 40 + random.nextInt(35);
     }
 
     private boolean isHome(Player p) {
@@ -441,7 +506,7 @@ public class Match {
         return Math.max(min, Math.min(max, value));
     }
 
-    private void moveToward(Player p, int targetX, int targetY, int speed) {
+    void moveToward(Player p, int targetX, int targetY, int speed) {
         if (p.getX() < targetX) {
             p.moveRight(Math.min(speed, targetX - p.getX()));
         } else if (p.getX() > targetX) {
@@ -456,7 +521,7 @@ public class Match {
     }
 
     // Players move with the play without abandoning their original positions
-    private void moveIntoShape(Player p, int ballX, int ballY) {
+    void moveIntoShape(Player p, int ballX, int ballY) {
         int centerX = ScreenSize.width / 2;
         int centerY = ScreenSize.height / 2;
 
@@ -493,45 +558,22 @@ public class Match {
         moveToward(p, targetX, targetY, 1);
     }
 
-    private Player findClosestPlayer(boolean homeTeam, int targetX, int targetY) {
-        Player closest = null;
-        double closestDistance = Double.MAX_VALUE;
-
-        for (Player p : players) {
-            if (p.isGoalkeeper() || isStunned(p) || isHome(p) != homeTeam) {
-                continue;
-            }
-
-            double distance = distanceBetween(p.getX(), p.getY(), targetX, targetY);
-
-            if (distance < closestDistance) {
-                closestDistance = distance;
-                closest = p;
-            }
-        }
-
-        return closest;
+    private Map<Boolean, Optional<Player>> findClosestPlayersByTeam(int targetX, int targetY) {
+        // group eligible players by team and find each team's closest player
+        return players.stream()
+                .filter(p -> !p.isGoalkeeper() && !isStunned(p))
+                .collect(Collectors.groupingBy(this::isHome,
+                        Collectors.minBy(Comparator.comparingDouble(p ->
+                                distanceBetween(p.getX(), p.getY(), targetX, targetY)))));
     }
 
     private Player findClosestOpponent(Player owner) {
-        Player closest = null;
-        double closestDistance = Double.MAX_VALUE;
         boolean ownerIsHome = isHome(owner);
-
-        for (Player p : players) {
-            if (p.isGoalkeeper() || isStunned(p) || isHome(p) == ownerIsHome) {
-                continue;
-            }
-
-            double distance = distanceBetween(p.getX(), p.getY(), owner.getX(), owner.getY());
-
-            if (distance < closestDistance) {
-                closestDistance = distance;
-                closest = p;
-            }
-        }
-
-        return closest;
+        return players.stream()
+                .filter(p -> !p.isGoalkeeper() && !isStunned(p) && isHome(p) != ownerIsHome)
+                .min(Comparator.comparingDouble(p ->
+                        distanceBetween(p.getX(), p.getY(), owner.getX(), owner.getY())))
+                .orElse(null);
     }
 
     private Player findPlayerTouchingBall(int pickupRadius) {
@@ -582,10 +624,154 @@ public class Match {
         ball.kick(velocityX, velocityY);
     }
 
+    private boolean shouldShoot(Player player) {
+        int goalX = isHome(player) ? ScreenSize.width : 0;
+        return possessionTicks >= 18
+                && Math.abs(goalX - player.getX()) < 200
+                && Math.abs(player.getY() - ScreenSize.height / 2) < 160
+                && random.nextInt(100) == 0;
+    }
+
+    private void shootBall(Player player) {
+        int goalX = isHome(player) ? ScreenSize.width : 0;
+        int goalY = ScreenSize.height / 2 + random.nextInt(61) - 30;
+        kickTowards(goalX, goalY, 12);
+    }
+
+    private void kickBallForward(Player player) {
+        int direction = isHome(player) ? 1 : -1;
+        int targetX = clamp(ball.getX() + direction * (180 + random.nextInt(160)),
+                30, ScreenSize.width - 30);
+        int targetY = clamp(ball.getY() + random.nextInt(241) - 120,
+                35, ScreenSize.height - 35);
+        kickTowards(targetX, targetY, 10);
+    }
+
+    private void kickTowards(int targetX, int targetY, int speed) {
+        int dx = targetX - ball.getX();
+        int dy = targetY - ball.getY();
+        double distance = Math.max(1, distanceBetween(ball.getX(), ball.getY(), targetX, targetY));
+        ball.kick((int) Math.round(dx * speed / distance),
+                (int) Math.round(dy * speed / distance));
+    }
+
+    private boolean isOwnerStuck(Player owner) {
+        if (owner != trackedOwner) {
+            trackedOwner = owner;
+            trackedOwnerX = owner.getX();
+            trackedOwnerY = owner.getY();
+            trackedOwnerTicks = 0;
+            return false;
+        }
+
+        trackedOwnerTicks++;
+        if (trackedOwnerTicks < STUCK_CHECK_TICKS) return false;
+
+        double progress = distanceBetween(trackedOwnerX, trackedOwnerY, owner.getX(), owner.getY());
+        trackedOwnerX = owner.getX();
+        trackedOwnerY = owner.getY();
+        trackedOwnerTicks = 0;
+        return progress < MIN_PROGRESS_DISTANCE;
+    }
+
+    private boolean clearBallFromTraffic() {
+        int ballX = ball.getX();
+        int ballY = ball.getY();
+
+        if (clearanceCooldown > 0) {
+            clearanceCooldown--;
+            trafficTicks = 0;
+            contestedTicks = 0;
+            return false;
+        }
+
+        Player owner = ball.getOwner();
+        boolean contested = false;
+        if (owner != null) {
+            for (Player player : players) {
+                if (player != owner && isHome(player) != isHome(owner)
+                        && distanceBetween(player.getX(), player.getY(), owner.getX(), owner.getY()) < 30) {
+                    contested = true;
+                    break;
+                }
+            }
+        }
+        contestedTicks = contested ? contestedTicks + 1 : 0;
+
+        if (trafficTicks == 0) {
+            trafficAnchorX = ballX;
+            trafficAnchorY = ballY;
+        }
+
+        boolean nearCorner = (ballX < 85 || ballX > ScreenSize.width - 85)
+                && (ballY < 85 || ballY > ScreenSize.height - 85);
+        int neededTicks = nearCorner ? CORNER_CHECK_TICKS : TRAFFIC_CHECK_TICKS;
+
+        if (distanceBetween(trafficAnchorX, trafficAnchorY, ballX, ballY) > 45) {
+            trafficTicks = 0;
+            trafficAnchorX = ballX;
+            trafficAnchorY = ballY;
+        }
+
+        trafficTicks++;
+        if (trafficTicks < neededTicks && contestedTicks < CONTESTED_CHECK_TICKS) return false;
+
+        int nearbyPlayers = 0;
+        for (Player player : players) {
+            if (distanceBetween(player.getX(), player.getY(), ballX, ballY) < 45) {
+                nearbyPlayers++;
+            }
+        }
+
+        if (!nearCorner && nearbyPlayers < 2 && contestedTicks < CONTESTED_CHECK_TICKS) {
+            trafficTicks = 0;
+            return false;
+        }
+
+        // Clear the ball sideways or forward when players get crowded
+        Player kicker = ball.getOwner();
+        int direction = kicker != null ? (isHome(kicker) ? 1 : -1)
+                : (ballX < ScreenSize.width / 2 ? 1 : -1);
+        int targetX = clamp(ballX + direction * (150 + random.nextInt(170)),
+                65, ScreenSize.width - 65);
+        int targetY = clamp(ballY + (ballY < ScreenSize.height / 2 ? 1 : -1)
+                * (90 + random.nextInt(150)), 65, ScreenSize.height - 65);
+        kickTowards(targetX, targetY, 11);
+
+        if (kicker != null) rememberKicker(kicker);
+        trafficTicks = 0;
+        contestedTicks = 0;
+        clearanceCooldown = CLEARANCE_COOLDOWN;
+        return true;
+    }
+
+    private void kickBallOutOfTraffic(Player kicker) {
+        // clear to a side or another area when the player cannot make progress
+        int targetX;
+        int targetY;
+
+        if (random.nextBoolean()) {
+            int direction = isHome(kicker) ? 1 : -1;
+            targetX = clamp(kicker.getX() + direction * (130 + random.nextInt(150)),
+                    45, ScreenSize.width - 45);
+            targetY = clamp(kicker.getY() + random.nextInt(241) - 120,
+                    45, ScreenSize.height - 45);
+        } else {
+            targetX = clamp(kicker.getX() + random.nextInt(161) - 80,
+                    45, ScreenSize.width - 45);
+            targetY = kicker.getY() < ScreenSize.height / 2
+                    ? clamp(kicker.getY() + 180, 45, ScreenSize.height - 45)
+                    : clamp(kicker.getY() - 180, 45, ScreenSize.height - 45);
+        }
+        kickTowards(targetX, targetY, 11);
+    }
+
     private void rememberKicker(Player kicker) {
         recentPasser = kicker;
         recentPasserCooldown = 12;
         possessionTicks = 0;
+        trackedOwner = null;
+        trackedOwnerTicks = 0;
     }
 
     private boolean passBall(Player passer) {
@@ -690,10 +876,19 @@ public class Match {
 
     public void stopSimulation() {
         this.isRunning = false;
+        this.isPaused = false;
 
         if (simulationThread != null && simulationThread != Thread.currentThread()) {
             simulationThread.interrupt();
         }
+    }
+
+    public void pauseSimulation() {
+        isPaused = true;
+    }
+
+    public void resumeSimulation() {
+        if (isRunning) isPaused = false;
     }
 
     // Called by TimerPanel when the match clock reaches 00:00
@@ -759,3 +954,6 @@ class Team {
     public Player[] getPlayers() { return players; }
     public void setPlayers(Player[] players) { this.players = players; }
 }
+
+
+

@@ -49,7 +49,17 @@ public class TimerPanel extends JPanel {
         timer.stop();
     }
 
-    public int getSecondsRemaining() {
-        return matchTimer.getSeconds();
+    public void pauseTimer() {
+        timer.stop();
+    }
+
+    public void resumeTimer() {
+        if (matchTimer.getSeconds() > 0) {
+            timer.start();
         }
     }
+
+    public int getSecondsRemaining() {
+        return matchTimer.getSeconds();
+    }
+}

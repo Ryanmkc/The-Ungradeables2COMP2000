@@ -1,9 +1,14 @@
 package Model;
 
-import java.awt.*;
-import javax.swing.*;
-import java.util.List;
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.FontMetrics;
+import java.awt.Graphics;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import javax.swing.JPanel;
 
 import Rendering.ScreenSize;
 
@@ -14,7 +19,19 @@ public class SoccerPitch extends JPanel {
     public static final int GOAL_WIDTH = 50;
     public static final int GOAL_HEIGHT = 100;
 
-    private List<Actor> actors = new ArrayList<>();
+    private static final class ActorFrame {
+        private final int x;
+        private final int y;
+        private final Color color;
+
+        private ActorFrame(int x, int y, Color color) {
+            this.x = x;
+            this.y = y;
+            this.color = color;
+        }
+    }
+
+    private volatile List<ActorFrame> actorFrames = Collections.emptyList();
     private volatile int homeScore = 0;
     private volatile int awayScore = 0;
     private volatile String matchMessage = "";
@@ -24,7 +41,15 @@ public class SoccerPitch extends JPanel {
     }
 
     public void setActors(List<Actor> actors) {
-        this.actors = actors;
+        List<ActorFrame> nextFrame = new ArrayList<>(actors.size());
+
+        for (Actor actor : actors) {
+            nextFrame.add(new ActorFrame(
+                    actor.getX(), actor.getY(), actor.getColor()));
+        }
+
+        // Publish the whole frame after all actor positions have been copied.
+        actorFrames = Collections.unmodifiableList(nextFrame);
         repaint();
     }
 
@@ -42,6 +67,9 @@ public class SoccerPitch extends JPanel {
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
+
+        List<ActorFrame> frame = actorFrames;
+        String message = matchMessage;
 
         g.setColor(new Color(50, 150, 50));
         g.fillRect(0, 0, ScreenSize.width, ScreenSize.height);
@@ -77,10 +105,10 @@ public class SoccerPitch extends JPanel {
         g.fillOval(spotOffset - 4, ScreenSize.height / 2 - 4, 8, 8);
         g.fillOval(ScreenSize.width - spotOffset - 4, ScreenSize.height / 2 - 4, 8, 8);
 
-        // Actors (players + ball)
-        for (Actor a : actors) {
-            g.setColor(a.getColor());
-            g.fillOval(a.getX() - 9, a.getY() - 9, 18, 18);
+        // Players and ball from the published frame
+        for (ActorFrame actor : frame) {
+            g.setColor(actor.color);
+            g.fillOval(actor.x - 9, actor.y - 9, 18, 18);
         }
 
         // Scoreboard
@@ -92,17 +120,17 @@ public class SoccerPitch extends JPanel {
         g.drawString(scoreText, scoreX, 88);
 
         // Temporary goal message or final full-time result
-        if (!matchMessage.isEmpty()) {
+        if (!message.isEmpty()) {
             g.setFont(new Font("Arial", Font.BOLD, 28));
             FontMetrics messageMetrics = g.getFontMetrics();
-            int messageWidth = messageMetrics.stringWidth(matchMessage);
+            int messageWidth = messageMetrics.stringWidth(message);
             int messageX = (ScreenSize.width - messageWidth) / 2;
             int messageY = ScreenSize.height / 2;
 
             g.setColor(new Color(0, 0, 0, 170));
             g.fillRoundRect(messageX - 18, messageY - 34, messageWidth + 36, 48, 16, 16);
             g.setColor(Color.WHITE);
-            g.drawString(matchMessage, messageX, messageY);
+            g.drawString(message, messageX, messageY);
         }
     }
 }
